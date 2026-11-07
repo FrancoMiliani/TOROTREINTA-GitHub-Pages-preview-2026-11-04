@@ -149,9 +149,23 @@
     });
     const allSelected = selections.length > 0 && selections.every(item => item.select.value && item.button);
     const allAvailable = allSelected && selections.every(item => item.button.dataset.sizeKnown === 'true' && Number(item.button.dataset.sizeQty) > 0);
+    const maxQuantity = allAvailable ? Math.min(...selections.map(item => Number(item.button.dataset.sizeQty))) : 0;
     const add = row.querySelector('.once-cart-add');
     const inquiry = row.querySelector('.once-stock-whatsapp');
-    const canAdd = !!canUseCart && allAvailable;
+    const quantityField = row.querySelector('.once-quantity-control');
+    const quantityInput = row.querySelector('[data-store-quantity]');
+    const quantityNote = row.querySelector('.once-quantity-limit');
+    if (quantityField) quantityField.hidden = !allAvailable;
+    if (quantityInput && maxQuantity > 0) {
+      quantityInput.max = String(maxQuantity);
+      const currentQuantity = Number(quantityInput.value);
+      if (!Number.isInteger(currentQuantity) || currentQuantity < 1) quantityInput.value = '1';
+      else if (currentQuantity > maxQuantity) quantityInput.value = String(maxQuantity);
+    }
+    const requestedQuantity = quantityInput ? Number(quantityInput.value) : 1;
+    const quantityValid = Number.isInteger(requestedQuantity) && requestedQuantity >= 1 && requestedQuantity <= maxQuantity;
+    if (quantityNote && allAvailable) quantityNote.textContent = 'Hasta ' + maxQuantity + (maxQuantity === 1 ? ' unidad disponible' : ' unidades disponibles') + ' para esta selección.';
+    const canAdd = !!canUseCart && allAvailable && quantityValid;
     if (add) { add.hidden = !canAdd; add.disabled = !canAdd; }
     if (inquiry) {
       inquiry.hidden = canAdd;
@@ -162,7 +176,9 @@
       });
       const message = 'Hola, quiero consultar disponibilidad de ' + product.name + ' de Once Corazones' + (requestedSizes.length ? ' (' + requestedSizes.join(' · ') + ')' : '') + '.';
       inquiry.href = 'https://wa.me/' + encodeURIComponent(torotreintaWhatsApp) + '?text=' + encodeURIComponent(message);
-      inquiry.textContent = requestedSizes.length ? 'Consultar este talle por WhatsApp ↗' : 'Consultar por WhatsApp ↗';
+      inquiry.textContent = allAvailable && !quantityValid
+        ? 'Consultar esta cantidad por WhatsApp ↗'
+        : requestedSizes.length ? 'Consultar este talle por WhatsApp ↗' : 'Consultar por WhatsApp ↗';
     }
   }
 
@@ -195,6 +211,9 @@
         applySelection();
       }));
     });
+    const quantityInput = row.querySelector('[data-store-quantity]');
+    quantityInput?.addEventListener('input',() => updatePurchaseActions(row,product,canUseCart));
+    quantityInput?.addEventListener('change',() => updatePurchaseActions(row,product,canUseCart));
     updatePurchaseActions(row,product,canUseCart);
   }
 
@@ -217,14 +236,20 @@
         .find(item => item.size + '|' + (item.color || '') === select.value);
       return { slot:select.dataset.storeSlot, variant:variant };
     });
+    const quantity = Number(copy.querySelector('[data-store-quantity]')?.value) || 1;
     if (chosen.some(item => !item.variant || Number(item.variant.quantity) < 1)) {
       if (typeof toast === 'function') toast('Ese talle se quedó sin stock. Actualizá la disponibilidad.');
       loadStock();
       return;
     }
+    if (chosen.some(item => Number(item.variant.quantity) < quantity)) {
+      if (typeof toast === 'function') toast('Quedan menos unidades en ese talle. Actualizá la disponibilidad.');
+      loadStock();
+      return;
+    }
     const sizeText = chosen.map(item => item.slot.replace(/_/g,' ') + ' ' + choiceLabel(item.variant)).join(' · ');
     const item = {
-      id:sku, productId:sku, name:product.name, size:sizeText, qty:1,
+      id:sku, productId:sku, name:product.name, size:sizeText, qty:quantity, stockLimit:Math.min(...chosen.map(item => Number(item.variant.quantity))),
       price:Number(product.price), image:card.querySelector(':scope > img')?.getAttribute('src') || '',
       kind:'stock', source:'once', storeSizes:sizes, storeColor:color
     };
@@ -261,6 +286,7 @@
     const row = document.createElement('div');
     row.className = 'once-cart-row once-live-stock-row';
     row.innerHTML = displaySlots.map(slot => makeSelect(slot,sku)).join('') +
+      '<label class="once-quantity-control" hidden><span>Cantidad</span><input data-store-quantity type="number" inputmode="numeric" min="1" value="1" step="1" aria-label="Cantidad a comprar"><small class="once-quantity-limit"></small></label>' +
       '<button type="button" class="once-cart-add" hidden>Agregar al carrito</button>' +
       '<a class="once-inquiry once-stock-whatsapp" href="#" target="_blank" rel="noopener">Consultar por WhatsApp ↗</a>';
     bindSizeOptions(row,product,canUseCart);
@@ -282,6 +308,28 @@
       if (guide) guide.before(status); else copy.append(status);
     }
   }
+
+  const previousChangeQty = changeQty;
+  changeQty = function (index, by) {
+    const item = cart[index];
+    if (item && item.source === 'once' && item.kind === 'stock' && Number(by) > 0) {
+      const product = stockFor(item.productId || item.id);
+      let maxQuantity = Number(item.stockLimit) || Infinity;
+      if (product && Array.isArray(product.slots) && product.slots.length) {
+        const limits = Object.entries(item.storeSizes || {}).map(([slotName,size]) => {
+          const slot = product.slots.find(entry => entry.slot === slotName);
+          const variant = slot && (slot.variants || []).find(entry => String(entry.size) === String(size) && String(entry.color || '') === String(item.storeColor || ''));
+          return variant ? Math.max(0,Number(variant.quantity) || 0) : 0;
+        });
+        if (limits.length) maxQuantity = Math.min(maxQuantity,...limits);
+      }
+      if (item.qty + Number(by) > maxQuantity) {
+        if (typeof toast === 'function') toast('Solo quedan ' + maxQuantity + (maxQuantity === 1 ? ' unidad disponible' : ' unidades disponibles') + ' para este talle.');
+        return;
+      }
+    }
+    return previousChangeQty(index,by);
+  };
 
   function updateOnceCards() {
     (stockData.products || []).forEach(product => {
@@ -425,7 +473,7 @@
   }
 
   const style = document.createElement('style');
-  style.textContent = '.once-live-stock-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-top:18px}.once-live-stock-row .once-cart-add,.once-stock-whatsapp{grid-column:1/-1;min-height:48px;border-radius:7px}.once-live-stock-row .once-cart-add[hidden],.once-stock-whatsapp[hidden]{display:none!important}.once-live-stock-row select{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important}.once-size-field{display:flex;flex-direction:column;gap:7px;color:#34445f;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.once-live-size-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:7px}.once-live-size-option{display:flex;min-height:48px;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 6px;border:1px solid #c8d0dc;border-radius:7px;background:#fff;color:#16243a;cursor:pointer}.once-live-size-option span{font-size:12px;font-weight:800}.once-live-size-option small{color:#287149;font-size:9px;font-weight:800;letter-spacing:0;text-transform:none}.once-live-size-option:hover{border-color:#1254dd}.once-live-size-option.selected{border-color:#1254dd;background:#1254dd;color:#fff;box-shadow:0 0 0 2px #1254dd22}.once-live-size-option.selected small{color:#fff}.once-live-size-option.is-sold-out{background:#f2f3f5;color:#87909d;border-color:#d9dde3}.once-live-size-option.is-sold-out small{color:#9b5555}.once-live-size-note{min-height:16px;margin:0;color:#526075;font-size:11px;font-weight:600;letter-spacing:0;text-transform:none}.store-stock-available{color:#207246!important}.once-store-stock{margin:12px 0;padding:11px;border-radius:7px;background:#f1f3f5;color:#586270;font-size:12px;line-height:1.5}.live-liso-inventory{padding:64px 7.2%;background:#eef0f3}.live-liso-head{margin-bottom:22px}.live-liso-head h2{margin:8px 0;font:800 clamp(34px,4vw,52px)/.95 var(--display);text-transform:uppercase}.live-liso-head p{color:#606a78;font-size:13px;line-height:1.6}.live-liso-list{display:grid;gap:9px}.live-liso-item{display:grid;grid-template-columns:1fr auto auto;gap:16px;align-items:center;padding:16px 18px;background:#fff;border:1px solid #dfe3e9;border-radius:7px}.live-liso-item h3{margin:0 0 5px;font:700 21px var(--display);text-transform:uppercase}.live-liso-item p{margin:0;color:#647082;font-size:11px;line-height:1.5}.live-liso-count{font-size:11px;font-weight:800;color:#207246;white-space:nowrap}.live-liso-item a,.store-order-whatsapp{font-size:11px;font-weight:800;color:#1254dd}.store-order-status{margin:12px 0 0;padding:12px;border-radius:7px;background:#eef4ff;color:#233d66;font-size:12px;line-height:1.6}.store-order-status a{display:block;margin-top:8px}.live-liso-item a{white-space:nowrap}@media(max-width:700px){.live-liso-inventory{padding:38px 16px}.live-liso-item{grid-template-columns:1fr auto;gap:8px;padding:14px}.live-liso-item a{grid-column:1/-1;white-space:normal}.live-liso-item h3{font-size:19px}.live-liso-item p{font-size:11px}.once-live-stock-row{grid-template-columns:1fr}.once-live-size-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.once-live-stock-row .once-cart-add,.once-stock-whatsapp{grid-column:auto}}';
+  style.textContent = '.once-live-stock-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-top:18px}.once-live-stock-row .once-cart-add,.once-stock-whatsapp{grid-column:1/-1;min-height:48px;border-radius:7px}.once-live-stock-row .once-cart-add[hidden],.once-stock-whatsapp[hidden],.once-quantity-control[hidden]{display:none!important}.once-live-stock-row select{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important}.once-size-field{display:flex;flex-direction:column;gap:7px;color:#34445f;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.once-live-size-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:7px}.once-live-size-option{display:flex;min-height:48px;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 6px;border:1px solid #c8d0dc;border-radius:7px;background:#fff;color:#16243a;cursor:pointer}.once-live-size-option span{font-size:12px;font-weight:800}.once-live-size-option small{color:#287149;font-size:9px;font-weight:800;letter-spacing:0;text-transform:none}.once-live-size-option:hover{border-color:#1254dd}.once-live-size-option.selected{border-color:#1254dd;background:#1254dd;color:#fff;box-shadow:0 0 0 2px #1254dd22}.once-live-size-option.selected small{color:#fff}.once-live-size-option.is-sold-out{background:#f2f3f5;color:#87909d;border-color:#d9dde3}.once-live-size-option.is-sold-out small{color:#9b5555}.once-live-size-note{min-height:16px;margin:0;color:#526075;font-size:11px;font-weight:600;letter-spacing:0;text-transform:none}.once-quantity-control{grid-column:1/-1;display:grid;grid-template-columns:auto 96px 1fr;gap:8px;align-items:center;color:#34445f;font-size:11px;font-weight:800;text-transform:uppercase}.once-quantity-control input{height:40px;padding:0 10px;border:1px solid #c8d0dc;border-radius:6px;font:600 14px var(--font)}.once-quantity-limit{color:#526075;font-size:10px;font-weight:600;letter-spacing:0;text-transform:none}.store-stock-available{color:#207246!important}.once-store-stock{margin:12px 0;padding:11px;border-radius:7px;background:#f1f3f5;color:#586270;font-size:12px;line-height:1.5}.live-liso-inventory{padding:64px 7.2%;background:#eef0f3}.live-liso-head{margin-bottom:22px}.live-liso-head h2{margin:8px 0;font:800 clamp(34px,4vw,52px)/.95 var(--display);text-transform:uppercase}.live-liso-head p{color:#606a78;font-size:13px;line-height:1.6}.live-liso-list{display:grid;gap:9px}.live-liso-item{display:grid;grid-template-columns:1fr auto auto;gap:16px;align-items:center;padding:16px 18px;background:#fff;border:1px solid #dfe3e9;border-radius:7px}.live-liso-item h3{margin:0 0 5px;font:700 21px var(--display);text-transform:uppercase}.live-liso-item p{margin:0;color:#647082;font-size:11px;line-height:1.5}.live-liso-count{font-size:11px;font-weight:800;color:#207246;white-space:nowrap}.live-liso-item a,.store-order-whatsapp{font-size:11px;font-weight:800;color:#1254dd}.store-order-status{margin:12px 0 0;padding:12px;border-radius:7px;background:#eef4ff;color:#233d66;font-size:12px;line-height:1.6}.store-order-status a{display:block;margin-top:8px}.live-liso-item a{white-space:nowrap}@media(max-width:700px){.live-liso-inventory{padding:38px 16px}.live-liso-item{grid-template-columns:1fr auto;gap:8px;padding:14px}.live-liso-item a{grid-column:1/-1;white-space:normal}.live-liso-item h3{font-size:19px}.live-liso-item p{font-size:11px}.once-live-stock-row{grid-template-columns:1fr}.once-live-size-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.once-live-stock-row .once-cart-add,.once-stock-whatsapp{grid-column:auto}.once-quantity-control{grid-column:auto;grid-template-columns:auto 96px;gap:8px}.once-quantity-limit{grid-column:1/-1}}';
   document.head.append(style);
   document.querySelectorAll('#page-club-once [data-once-product]').forEach(card => {
     const copy = card.querySelector('.once-new-copy');
