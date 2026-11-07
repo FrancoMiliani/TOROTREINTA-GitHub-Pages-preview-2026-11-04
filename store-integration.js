@@ -59,6 +59,24 @@
     return bits.join(' · ');
   }
 
+  const providerGuideProducts = new Set([
+    'once-remera-entrenamiento','once-short-entrenamiento',
+    'once-conjunto-prematch','once-short-partido-blanco'
+  ]);
+
+  function variantsForSlot(slot, productId) {
+    const variants = Array.isArray(slot.variants) ? slot.variants : [];
+    if (!providerGuideProducts.has(productId) || typeof providerSizeOptions !== 'function') return variants;
+    const sizes = providerSizeOptions();
+    if (!sizes.length) return variants;
+    const ordered = sizes.flatMap(size => {
+      const matches = variants.filter(variant => String(variant.size) === String(size));
+      return matches.length ? matches : [{ size:size, color:'', quantity:slot.mapped ? 0 : null }];
+    });
+    const extra = variants.filter(variant => !sizes.some(size => String(size) === String(variant.size)));
+    return ordered.concat(extra);
+  }
+
   function setStockNote(card, product) {
     if (!product) return;
     const teaser = card.querySelector('.once-catalog-teaser small');
@@ -101,20 +119,21 @@
     }
   }
 
-  function makeSelect(slot) {
-    const variants = Array.isArray(slot.variants) ? slot.variants : [];
+  function makeSelect(slot, productId) {
+    const variants = variantsForSlot(slot,productId);
+    const stockKnown = !!slot.mapped;
     const options = variants.map(variant => {
       const key = variant.size + '|' + (variant.color || '');
-      const qty = Math.max(0,Number(variant.quantity)||0);
-      return '<option value="' + html(key) + '"' + (qty > 0 ? '' : ' disabled') + '>' + html(choiceLabel(variant)) + '</option>';
+      return '<option value="' + html(key) + '">' + html(choiceLabel(variant)) + '</option>';
     }).join('');
     const buttons = variants.map(variant => {
       const key = variant.size + '|' + (variant.color || '');
-      const qty = Math.max(0,Number(variant.quantity)||0);
+      const known = stockKnown && variant.quantity != null && Number.isFinite(Number(variant.quantity));
+      const qty = known ? Math.max(0,Number(variant.quantity)||0) : null;
       const label = choiceLabel(variant);
-      const stockLabel = qty === 1 ? '1 disp.' : qty > 1 ? qty + ' disp.' : 'Agotado';
-      const accessible = qty > 0 ? label + ': ' + qty + (qty === 1 ? ' unidad disponible' : ' unidades disponibles') : label + ': agotado';
-      return '<button type="button" class="once-live-size-option' + (qty > 0 ? '' : ' is-sold-out') + '" data-size-key="' + html(key) + '" data-size-qty="' + qty + '" aria-label="' + html(accessible) + '" aria-pressed="false"' + (qty > 0 ? '' : ' disabled') + '><span>' + html(label) + '</span><small>' + html(stockLabel) + '</small></button>';
+      const stockLabel = !known ? 'Consultar' : qty === 1 ? '1 disp.' : qty > 1 ? qty + ' disp.' : 'Agotado';
+      const accessible = !known ? label + ': stock a confirmar. Toca para consultar por WhatsApp.' : qty > 0 ? label + ': ' + qty + (qty === 1 ? ' unidad disponible' : ' unidades disponibles') : label + ': sin stock. Toca para consultar por WhatsApp.';
+      return '<button type="button" class="once-live-size-option' + (!known || qty < 1 ? ' is-sold-out' : '') + '" data-size-key="' + html(key) + '" data-size-known="' + known + '" data-size-qty="' + (known ? qty : '') + '" aria-label="' + html(accessible) + '" aria-pressed="false"><span>' + html(label) + '</span><small>' + html(stockLabel) + '</small></button>';
     }).join('');
     return '<div class="once-size-field"><span>' + html(slot.name || slot.slot) + '</span>' +
       '<select data-store-slot="' + html(slot.slot) + '" aria-label="Elegí ' + html(slot.name || slot.slot) + '"><option value="">Elegí talle</option>' + options + '</select>' +
@@ -122,27 +141,61 @@
       '<p class="once-live-size-note" aria-live="polite">Tocá un talle para ver su disponibilidad.</p></div>';
   }
 
-  function bindSizeOptions(row) {
+  function updatePurchaseActions(row, product, canUseCart) {
+    const selects = [...row.querySelectorAll('[data-store-slot]')];
+    const selections = selects.map(select => {
+      const button = select.closest('.once-size-field')?.querySelector('.once-live-size-option.selected');
+      return { select:select, button:button };
+    });
+    const allSelected = selections.length > 0 && selections.every(item => item.select.value && item.button);
+    const allAvailable = allSelected && selections.every(item => item.button.dataset.sizeKnown === 'true' && Number(item.button.dataset.sizeQty) > 0);
+    const add = row.querySelector('.once-cart-add');
+    const inquiry = row.querySelector('.once-stock-whatsapp');
+    const canAdd = !!canUseCart && allAvailable;
+    if (add) { add.hidden = !canAdd; add.disabled = !canAdd; }
+    if (inquiry) {
+      inquiry.hidden = canAdd;
+      const requestedSizes = selections.filter(item => item.select.value).map(item => {
+        const slotName = item.select.closest('.once-size-field')?.querySelector(':scope > span')?.textContent || item.select.dataset.storeSlot;
+        const sizeName = item.button?.querySelector('span')?.textContent || item.select.value.split('|')[0];
+        return slotName + ': ' + sizeName;
+      });
+      const message = 'Hola, quiero consultar disponibilidad de ' + product.name + ' de Once Corazones' + (requestedSizes.length ? ' (' + requestedSizes.join(' · ') + ')' : '') + '.';
+      inquiry.href = 'https://wa.me/' + encodeURIComponent(torotreintaWhatsApp) + '?text=' + encodeURIComponent(message);
+      inquiry.textContent = requestedSizes.length ? 'Consultar este talle por WhatsApp ↗' : 'Consultar por WhatsApp ↗';
+    }
+  }
+
+  function bindSizeOptions(row, product, canUseCart) {
     row.querySelectorAll('[data-store-slot]').forEach(select => {
       const field = select.closest('.once-size-field');
       const grid = field && field.querySelector('.once-live-size-grid');
       const note = field && field.querySelector('.once-live-size-note');
       if (!grid) return;
-      grid.querySelectorAll('.once-live-size-option').forEach(button => button.addEventListener('click',() => {
-        select.value = button.dataset.sizeKey;
+      const applySelection = () => {
+        const current = [...grid.querySelectorAll('.once-live-size-option')].find(button => button.dataset.sizeKey === select.value);
         grid.querySelectorAll('.once-live-size-option').forEach(option => {
-          const selected = option === button;
+          const selected = option === current;
           option.classList.toggle('selected',selected);
           option.setAttribute('aria-pressed',String(selected));
         });
-        const quantity = Number(button.dataset.sizeQty) || 0;
-        const selectedLabel = button.querySelector('span')?.textContent || 'Ese talle';
-        note.textContent = quantity === 1
-          ? 'Queda 1 unidad en talle ' + selectedLabel + '.'
-          : 'Quedan ' + quantity + ' unidades en talle ' + selectedLabel + '.';
-        select.dispatchEvent(new Event('change',{bubbles:true}));
+        if (current) {
+          const selectedLabel = current.querySelector('span')?.textContent || 'Ese talle';
+          note.textContent = current.dataset.sizeKnown !== 'true'
+            ? 'Stock del talle ' + selectedLabel + ' a confirmar. Consultá por WhatsApp.'
+            : Number(current.dataset.sizeQty) > 0
+              ? Number(current.dataset.sizeQty) === 1 ? 'Queda 1 unidad en talle ' + selectedLabel + '.' : 'Quedan ' + current.dataset.sizeQty + ' unidades en talle ' + selectedLabel + '.'
+              : 'El talle ' + selectedLabel + ' está sin stock. Consultá por WhatsApp.';
+        } else note.textContent = 'Tocá un talle para ver su disponibilidad.';
+        updatePurchaseActions(row,product,canUseCart);
+      };
+      select.addEventListener('change',applySelection);
+      grid.querySelectorAll('.once-live-size-option').forEach(button => button.addEventListener('click',() => {
+        select.value = button.dataset.sizeKey;
+        applySelection();
       }));
     });
+    updatePurchaseActions(row,product,canUseCart);
   }
 
   function addStoreProduct(sku, card, product) {
@@ -193,7 +246,10 @@
     const slots = Array.isArray(product.slots) ? product.slots : [];
     const mapped = slots.length > 0 && slots.every(slot => slot.mapped && Array.isArray(slot.variants));
     const count = slots.flatMap(slot => slot.variants || []).reduce((sum,variant) => sum + Math.max(0,Number(variant.quantity)||0),0);
-    if (!mapped) {
+    const displaySlots = slots.length ? slots : providerGuideProducts.has(sku)
+      ? [{slot:'TALLE',name:'Talle',mapped:false,variants:[]}]
+      : [];
+    if (!displaySlots.length) {
       const status = document.createElement('p');
       status.className = 'once-store-stock';
       status.textContent = 'El stock por talle todavía no está cargado en la app interna. Consultanos por WhatsApp.';
@@ -201,23 +257,27 @@
       if (guide) guide.before(status); else copy.append(status);
       return;
     }
-    const canBuy = count > 0 && product.available && product.priceConfirmed;
+    const canUseCart = mapped && count > 0 && product.available && product.priceConfirmed;
     const row = document.createElement('div');
     row.className = 'once-cart-row once-live-stock-row';
-    row.innerHTML = product.slots.map(makeSelect).join('') + (canBuy ? '<button type="button" class="once-cart-add">Agregar al carrito</button>' : '');
-    bindSizeOptions(row);
+    row.innerHTML = displaySlots.map(slot => makeSelect(slot,sku)).join('') +
+      '<button type="button" class="once-cart-add" hidden>Agregar al carrito</button>' +
+      '<a class="once-inquiry once-stock-whatsapp" href="#" target="_blank" rel="noopener">Consultar por WhatsApp ↗</a>';
+    bindSizeOptions(row,product,canUseCart);
+    copy.querySelector(':scope > .once-inquiry:not(.once-stock-whatsapp)')?.remove();
     copy.append(row);
-    if (canBuy) {
-      copy.querySelector('.once-inquiry')?.remove();
+    if (canUseCart) {
       row.querySelector('.once-cart-add').addEventListener('click',() => addStoreProduct(sku,card,product));
     } else {
       const status = document.createElement('p');
       status.className = 'once-store-stock';
-      status.textContent = count < 1
-        ? 'No quedan unidades disponibles. Consultanos por WhatsApp.'
-        : !product.priceConfirmed
-          ? 'Precio a confirmar. Consultanos por WhatsApp.'
-          : 'Este producto no está habilitado para compra online. Consultanos por WhatsApp.';
+      status.textContent = !mapped
+        ? 'El stock de estos talles no está confirmado en la app interna.'
+        : count < 1
+          ? 'No quedan unidades cargadas. Consultanos por WhatsApp.'
+          : !product.priceConfirmed
+            ? 'Precio a confirmar. Consultanos por WhatsApp.'
+            : 'Este producto no está habilitado para compra online. Consultanos por WhatsApp.';
       const guide = copy.querySelector('.size-guide');
       if (guide) guide.before(status); else copy.append(status);
     }
@@ -365,7 +425,7 @@
   }
 
   const style = document.createElement('style');
-  style.textContent = '.once-live-stock-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-top:18px}.once-live-stock-row .once-cart-add{grid-column:1/-1;min-height:48px;border-radius:7px}.once-live-stock-row select{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important}.once-size-field{display:flex;flex-direction:column;gap:7px;color:#34445f;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.once-live-size-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:7px}.once-live-size-option{display:flex;min-height:48px;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 6px;border:1px solid #c8d0dc;border-radius:7px;background:#fff;color:#16243a;cursor:pointer}.once-live-size-option span{font-size:12px;font-weight:800}.once-live-size-option small{color:#287149;font-size:9px;font-weight:800;letter-spacing:0;text-transform:none}.once-live-size-option:hover:not(:disabled){border-color:#1254dd}.once-live-size-option.selected{border-color:#1254dd;background:#1254dd;color:#fff;box-shadow:0 0 0 2px #1254dd22}.once-live-size-option.selected small{color:#fff}.once-live-size-option:disabled{background:#f2f3f5;color:#959eaa;text-decoration:line-through;cursor:not-allowed}.once-live-size-option:disabled small{color:#a34b4b;text-decoration:none}.once-live-size-note{min-height:16px;margin:0;color:#526075;font-size:11px;font-weight:600;letter-spacing:0;text-transform:none}.store-stock-available{color:#207246!important}.once-store-stock{margin:12px 0;padding:11px;border-radius:7px;background:#f1f3f5;color:#586270;font-size:12px;line-height:1.5}.live-liso-inventory{padding:64px 7.2%;background:#eef0f3}.live-liso-head{margin-bottom:22px}.live-liso-head h2{margin:8px 0;font:800 clamp(34px,4vw,52px)/.95 var(--display);text-transform:uppercase}.live-liso-head p{color:#606a78;font-size:13px;line-height:1.6}.live-liso-list{display:grid;gap:9px}.live-liso-item{display:grid;grid-template-columns:1fr auto auto;gap:16px;align-items:center;padding:16px 18px;background:#fff;border:1px solid #dfe3e9;border-radius:7px}.live-liso-item h3{margin:0 0 5px;font:700 21px var(--display);text-transform:uppercase}.live-liso-item p{margin:0;color:#647082;font-size:11px;line-height:1.5}.live-liso-count{font-size:11px;font-weight:800;color:#207246;white-space:nowrap}.live-liso-item a,.store-order-whatsapp{font-size:11px;font-weight:800;color:#1254dd}.store-order-status{margin:12px 0 0;padding:12px;border-radius:7px;background:#eef4ff;color:#233d66;font-size:12px;line-height:1.6}.store-order-status a{display:block;margin-top:8px}.live-liso-item a{white-space:nowrap}@media(max-width:700px){.live-liso-inventory{padding:38px 16px}.live-liso-item{grid-template-columns:1fr auto;gap:8px;padding:14px}.live-liso-item a{grid-column:1/-1;white-space:normal}.live-liso-item h3{font-size:19px}.live-liso-item p{font-size:11px}.once-live-stock-row{grid-template-columns:1fr}.once-live-size-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.once-live-stock-row .once-cart-add{grid-column:auto}}';
+  style.textContent = '.once-live-stock-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-top:18px}.once-live-stock-row .once-cart-add,.once-stock-whatsapp{grid-column:1/-1;min-height:48px;border-radius:7px}.once-live-stock-row .once-cart-add[hidden],.once-stock-whatsapp[hidden]{display:none!important}.once-live-stock-row select{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important}.once-size-field{display:flex;flex-direction:column;gap:7px;color:#34445f;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.once-live-size-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:7px}.once-live-size-option{display:flex;min-height:48px;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 6px;border:1px solid #c8d0dc;border-radius:7px;background:#fff;color:#16243a;cursor:pointer}.once-live-size-option span{font-size:12px;font-weight:800}.once-live-size-option small{color:#287149;font-size:9px;font-weight:800;letter-spacing:0;text-transform:none}.once-live-size-option:hover{border-color:#1254dd}.once-live-size-option.selected{border-color:#1254dd;background:#1254dd;color:#fff;box-shadow:0 0 0 2px #1254dd22}.once-live-size-option.selected small{color:#fff}.once-live-size-option.is-sold-out{background:#f2f3f5;color:#87909d;border-color:#d9dde3}.once-live-size-option.is-sold-out small{color:#9b5555}.once-live-size-note{min-height:16px;margin:0;color:#526075;font-size:11px;font-weight:600;letter-spacing:0;text-transform:none}.store-stock-available{color:#207246!important}.once-store-stock{margin:12px 0;padding:11px;border-radius:7px;background:#f1f3f5;color:#586270;font-size:12px;line-height:1.5}.live-liso-inventory{padding:64px 7.2%;background:#eef0f3}.live-liso-head{margin-bottom:22px}.live-liso-head h2{margin:8px 0;font:800 clamp(34px,4vw,52px)/.95 var(--display);text-transform:uppercase}.live-liso-head p{color:#606a78;font-size:13px;line-height:1.6}.live-liso-list{display:grid;gap:9px}.live-liso-item{display:grid;grid-template-columns:1fr auto auto;gap:16px;align-items:center;padding:16px 18px;background:#fff;border:1px solid #dfe3e9;border-radius:7px}.live-liso-item h3{margin:0 0 5px;font:700 21px var(--display);text-transform:uppercase}.live-liso-item p{margin:0;color:#647082;font-size:11px;line-height:1.5}.live-liso-count{font-size:11px;font-weight:800;color:#207246;white-space:nowrap}.live-liso-item a,.store-order-whatsapp{font-size:11px;font-weight:800;color:#1254dd}.store-order-status{margin:12px 0 0;padding:12px;border-radius:7px;background:#eef4ff;color:#233d66;font-size:12px;line-height:1.6}.store-order-status a{display:block;margin-top:8px}.live-liso-item a{white-space:nowrap}@media(max-width:700px){.live-liso-inventory{padding:38px 16px}.live-liso-item{grid-template-columns:1fr auto;gap:8px;padding:14px}.live-liso-item a{grid-column:1/-1;white-space:normal}.live-liso-item h3{font-size:19px}.live-liso-item p{font-size:11px}.once-live-stock-row{grid-template-columns:1fr}.once-live-size-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.once-live-stock-row .once-cart-add,.once-stock-whatsapp{grid-column:auto}}';
   document.head.append(style);
   document.querySelectorAll('#page-club-once [data-once-product]').forEach(card => {
     const copy = card.querySelector('.once-new-copy');
